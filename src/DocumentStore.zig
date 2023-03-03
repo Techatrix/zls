@@ -998,7 +998,7 @@ pub fn resolveCImport(self: *DocumentStore, handle: Handle, node: Ast.Node.Index
 /// and returns it's uri
 /// caller owns the returned memory
 pub fn uriFromImportStr(self: *const DocumentStore, allocator: std.mem.Allocator, handle: Handle, import_str: []const u8) error{OutOfMemory}!?Uri {
-    if (std.mem.eql(u8, import_str, "std")) {
+    if (std.mem.eql(u8, import_str, "std")) { // @import("std")
         const zig_lib_path = self.config.zig_lib_path orelse return null;
 
         const std_path = std.fs.path.resolve(allocator, &[_][]const u8{ zig_lib_path, "./std/std.zig" }) catch |err| switch (err) {
@@ -1008,7 +1008,7 @@ pub fn uriFromImportStr(self: *const DocumentStore, allocator: std.mem.Allocator
 
         defer allocator.free(std_path);
         return try URI.fromPath(allocator, std_path);
-    } else if (std.mem.eql(u8, import_str, "builtin")) {
+    } else if (std.mem.eql(u8, import_str, "builtin")) { // @import("builtin")
         if (handle.associated_build_file) |build_file_uri| {
             const build_file = self.build_files.get(build_file_uri).?;
             if (build_file.builtin_uri) |builtin_uri| {
@@ -1019,7 +1019,7 @@ pub fn uriFromImportStr(self: *const DocumentStore, allocator: std.mem.Allocator
             return try URI.fromPath(allocator, self.config.builtin_path.?);
         }
         return null;
-    } else if (!std.mem.endsWith(u8, import_str, ".zig")) {
+    } else if (std.fs.path.extension(import_str).len == 0) { // @import("some_module")
         if (handle.associated_build_file) |build_file_uri| {
             const build_file = self.build_files.get(build_file_uri).?;
             for (build_file.config.packages) |pkg| {
@@ -1029,7 +1029,7 @@ pub fn uriFromImportStr(self: *const DocumentStore, allocator: std.mem.Allocator
             }
         }
         return null;
-    } else {
+    } else { // @import("some_file.zig")
         var seperator_index = handle.uri.len;
         while (seperator_index > 0) : (seperator_index -= 1) {
             if (std.fs.path.isSep(handle.uri[seperator_index - 1])) break;

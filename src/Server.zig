@@ -1699,16 +1699,19 @@ fn completeFileSystemStringLiteral(
         var it = iterable_dir.iterateAssumeFirstIteration();
 
         while (it.next() catch null) |entry| {
-            const expected_extension = switch (pos_context) {
-                .import_string_literal => ".zig",
-                .cinclude_string_literal => ".h",
+            const expected_extensions: ?[]const []const u8 = switch (pos_context) {
+                .import_string_literal => &.{ ".zig", ".zon" },
+                .cinclude_string_literal => &.{".h"},
                 .embedfile_string_literal => null,
                 else => unreachable,
             };
             switch (entry.kind) {
-                .File => if (expected_extension) |expected| {
-                    const actual_extension = std.fs.path.extension(entry.name);
-                    if (!std.mem.eql(u8, actual_extension, expected)) continue;
+                .File => if (expected_extensions) |extensions| {
+                    for (extensions) |expected| {
+                        const actual_extension = std.fs.path.extension(entry.name);
+                        if (std.mem.eql(u8, actual_extension, expected)) break;
+                    }
+                    continue;
                 },
                 .Directory => {},
                 else => continue,
