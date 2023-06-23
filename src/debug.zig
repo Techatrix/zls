@@ -50,7 +50,6 @@ pub fn printDocumentScope(doc_scope: analysis.DocumentScope) void {
             \\  parent: {}
             \\  child scopes: {any}
             \\  usingnamespaces: {any}
-            \\  tests: {any}
             \\  decls:
             \\
         , .{
@@ -60,7 +59,6 @@ pub fn printDocumentScope(doc_scope: analysis.DocumentScope) void {
             scope.parent,
             scope.child_scopes.items,
             scope.uses,
-            scope.tests,
         });
 
         var decl_it = scope.decls.iterator();

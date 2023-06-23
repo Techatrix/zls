@@ -2538,12 +2538,10 @@ pub const DocumentScope = struct {
         for (
             self.scopes.items(.decls),
             self.scopes.items(.child_scopes),
-            self.scopes.items(.tests),
             self.scopes.items(.uses),
-        ) |*decls, *child_scopes, tests, uses| {
+        ) |*decls, *child_scopes, uses| {
             decls.deinit(allocator);
             child_scopes.deinit(allocator);
-            allocator.free(tests);
             allocator.free(uses);
         }
         self.scopes.deinit(allocator);
@@ -2593,7 +2591,6 @@ pub const Scope = struct {
     data: Data,
     decls: std.StringArrayHashMapUnmanaged(Declaration.Index) = .{},
     child_scopes: std.ArrayListUnmanaged(Scope.Index) = .{},
-    tests: []const Ast.Node.Index = &.{},
     uses: []const Ast.Node.Index = &.{},
 };
 
@@ -2669,8 +2666,6 @@ fn makeInnerScope(context: ScopeContext, tree: Ast, node_idx: Ast.Node.Index) er
     var buf: [2]Ast.Node.Index = undefined;
     const container_decl = tree.fullContainerDecl(&buf, node_idx).?;
 
-    var tests = std.ArrayListUnmanaged(Ast.Node.Index){};
-    errdefer tests.deinit(allocator);
     var uses = std.ArrayListUnmanaged(Ast.Node.Index){};
     errdefer uses.deinit(allocator);
 
@@ -2682,10 +2677,7 @@ fn makeInnerScope(context: ScopeContext, tree: Ast, node_idx: Ast.Node.Index) er
                 try uses.append(allocator, decl);
                 continue;
             },
-            .test_decl => {
-                try tests.append(allocator, decl);
-                continue;
-            },
+            .test_decl => continue,
             else => {},
         }
 
@@ -2713,7 +2705,6 @@ fn makeInnerScope(context: ScopeContext, tree: Ast, node_idx: Ast.Node.Index) er
         }
     }
 
-    scopes.items(.tests)[@intFromEnum(scope_index)] = try tests.toOwnedSlice(allocator);
     scopes.items(.uses)[@intFromEnum(scope_index)] = try uses.toOwnedSlice(allocator);
 }
 
