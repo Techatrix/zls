@@ -241,7 +241,7 @@ pub fn symbolReferences(
 
                 var it = fn_proto.iterate(&curr_handle.tree);
                 while (ast.nextFnParam(&it)) |candidate| {
-                    if (!std.meta.eql(candidate, payload.param)) continue;
+                    if (!std.meta.eql(candidate, payload.getParam(curr_handle.tree))) continue;
 
                     if (curr_handle.tree.nodes.items(.tag)[proto] != .fn_decl) break :blk;
                     try builder.collectReferences(curr_handle, curr_handle.tree.nodes.items(.data)[proto].rhs);

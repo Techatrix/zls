@@ -360,7 +360,7 @@ fn declToCompletion(context: DeclToCompletionContext, decl_handle: Analyser.Decl
         .param_payload => |pay| {
             const Documentation = @TypeOf(@as(types.CompletionItem, undefined).documentation);
 
-            const param = pay.param;
+            const param = pay.getParam(tree);
             const doc_kind: types.MarkupKind = if (context.server.client_capabilities.completion_doc_supports_md) .markdown else .plaintext;
             const doc: Documentation = if (param.first_doc_comment) |doc_comments| .{ .MarkupContent = types.MarkupContent{
                 .kind = doc_kind,

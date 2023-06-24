@@ -301,6 +301,7 @@ pub fn isSnakeCase(name: []const u8) bool {
 pub fn getDeclNameToken(tree: Ast, node: Ast.Node.Index) ?Ast.TokenIndex {
     const tags = tree.nodes.items(.tag);
     const datas = tree.nodes.items(.data);
+    const token_tags = tree.tokens.items(.tag);
     const main_token = tree.nodes.items(.main_token)[node];
 
     return switch (tags[node]) {
@@ -346,6 +347,17 @@ pub fn getDeclNameToken(tree: Ast, node: Ast.Node.Index) ?Ast.TokenIndex {
         }, // 'error'.<main_token +2>
 
         .test_decl => datas[node].lhs,
+
+        .switch_case_one,
+        .switch_case_inline_one,
+        .switch_case,
+        .switch_case_inline,
+        => {
+            const switch_case: Ast.full.SwitchCase = tree.fullSwitchCase(node).?;
+            const payload_token = switch_case.payload_token orelse return null;
+            // if payload is *name than get next token
+            return payload_token + @intFromBool(token_tags[payload_token] == .asterisk);
+        },
 
         else => null,
     };
@@ -1945,9 +1957,18 @@ pub const Declaration = union(enum) {
     ast_node: Ast.Node.Index,
     /// Function parameter
     param_payload: struct {
-        param: Ast.full.FnProto.Param,
-        param_idx: u16,
         func: Ast.Node.Index,
+        param_idx: u16,
+
+        pub fn getParam(self: @This(), tree: Ast) Ast.full.FnProto.Param {
+            var buffer: [1]Ast.Node.Index = undefined;
+            const func = tree.fullFnProto(&buffer, self.func).?;
+            var it = func.iterate(&tree);
+            var param_index: u16 = 0;
+            while (ast.nextFnParam(&it)) |param| : (param_index += 1) {
+                if (param_index == self.param_idx) return param;
+            } else unreachable;
+        }
     },
     pointer_payload: struct {
         name: Ast.TokenIndex,
@@ -1959,9 +1980,8 @@ pub const Declaration = union(enum) {
     },
     array_index: Ast.TokenIndex,
     switch_payload: struct {
-        node: Ast.TokenIndex,
         switch_expr: Ast.Node.Index,
-        items: []const Ast.Node.Index,
+        switch_case: Ast.Node.Index,
     },
     label_decl: struct {
         label: Ast.TokenIndex,
@@ -1977,6 +1997,10 @@ pub const Declaration = union(enum) {
     }
 };
 
+comptime {
+    std.debug.assert(@sizeOf(Declaration) == 12);
+}
+
 pub const DeclWithHandle = struct {
     decl: *Declaration,
     handle: *const DocumentStore.Handle,
@@ -1989,11 +2013,11 @@ pub const DeclWithHandle = struct {
         const tree = self.handle.tree;
         return switch (self.decl.*) {
             .ast_node => |n| getDeclNameToken(tree, n).?,
-            .param_payload => |pp| pp.param.name_token.?,
+            .param_payload => |pp| pp.getParam(tree).name_token.?,
             .pointer_payload => |pp| pp.name,
             .array_payload => |ap| ap.identifier,
             .array_index => |ai| ai,
-            .switch_payload => |sp| sp.node,
+            .switch_payload => |sp| getDeclNameToken(tree, sp.switch_case).?,
             .label_decl => |ld| ld.label,
             .error_token => |et| et,
         };
@@ -2015,8 +2039,9 @@ pub const DeclWithHandle = struct {
                 .{ .node = node, .handle = self.handle },
             ),
             .param_payload => |pay| {
+                const param_decl = pay.getParam(tree);
                 // handle anytype
-                if (pay.param.type_expr == 0) {
+                if (param_decl.type_expr == 0) {
                     var func_decl = Declaration{ .ast_node = pay.func };
 
                     var func_buf: [1]Ast.Node.Index = undefined;
@@ -2080,7 +2105,6 @@ pub const DeclWithHandle = struct {
                     };
                 }
 
-                const param_decl = pay.param;
                 if (isMetaType(self.handle.tree, param_decl.type_expr)) {
                     var bound_param_it = analyser.bound_type_params.iterator();
                     while (bound_param_it.next()) |entry| {
@@ -2116,7 +2140,9 @@ pub const DeclWithHandle = struct {
             },
             .label_decl => return null,
             .switch_payload => |pay| {
-                if (pay.items.len == 0) return null;
+                const switch_case: Ast.full.SwitchCase = tree.fullSwitchCase(pay.switch_case).?;
+
+                if (switch_case.ast.values.len == 0) return null;
                 // TODO Peer type resolution, we just use the first item for now.
                 const switch_expr_type = (try analyser.resolveTypeOfNodeInternal(.{
                     .node = pay.switch_expr,
@@ -2125,12 +2151,12 @@ pub const DeclWithHandle = struct {
                 if (!switch_expr_type.isUnionType())
                     return null;
 
-                if (node_tags[pay.items[0]] != .enum_literal) return null;
+                if (node_tags[switch_case.ast.values[0]] != .enum_literal) return null;
 
                 const scope_index = findContainerScopeIndex(.{ .node = switch_expr_type.type.data.other, .handle = switch_expr_type.handle }) orelse return null;
                 const scope_decls = switch_expr_type.handle.document_scope.scopes.items(.decls);
 
-                const name = tree.tokenSlice(main_tokens[pay.items[0]]);
+                const name = tree.tokenSlice(main_tokens[switch_case.ast.values[0]]);
                 const decl_index = scope_decls[scope_index].get(name) orelse return null;
                 const decl = switch_expr_type.handle.document_scope.decls.items[@intFromEnum(decl_index)];
 
@@ -2813,22 +2839,21 @@ fn makeScopeInternal(context: ScopeContext, tree: Ast, node_idx: Ast.Node.Index)
             // NOTE: We count the param index ourselves
             // as param_i stops counting; TODO: change this
 
-            var param_index: usize = 0;
+            var param_index: u16 = 0;
 
             var it = func.iterate(&tree);
-            while (ast.nextFnParam(&it)) |param| {
+            while (ast.nextFnParam(&it)) |param| : (param_index += 1) {
                 // Add parameter decls
                 if (param.name_token) |name_token| {
                     try context.putDecl(
                         scope_index,
                         tree.tokenSlice(name_token),
-                        .{ .param_payload = .{ .param = param, .param_idx = @intCast(u16, param_index), .func = node_idx } },
+                        .{ .param_payload = .{ .param_idx = param_index, .func = node_idx } },
                     );
                 }
                 // Visit parameter types to pick up any error sets and enum
                 //   completions
                 try makeScopeInternal(context, tree, param.type_expr);
-                param_index += 1;
             }
 
             if (fn_tag == .fn_decl) blk: {
@@ -3035,7 +3060,7 @@ fn makeScopeInternal(context: ScopeContext, tree: Ast, node_idx: Ast.Node.Index)
                     const name = tree.tokenSlice(name_token);
 
                     try context.putDecl(expr_index, name, .{
-                        .switch_payload = .{ .node = name_token, .switch_expr = cond, .items = switch_case.ast.values },
+                        .switch_payload = .{ .switch_expr = cond, .switch_case = case },
                     });
 
                     try makeScopeInternal(context, tree, switch_case.ast.target_expr);

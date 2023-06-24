@@ -43,7 +43,7 @@ pub fn hoverSymbol(server: *Server, decl_handle: Analyser.DeclWithHandle, markup
             }
         },
         .param_payload => |pay| def: {
-            const param = pay.param;
+            const param = pay.getParam(tree);
             if (param.first_doc_comment) |doc_comments| {
                 doc_str = try Analyser.collectDocComments(server.arena.allocator(), handle.tree, doc_comments, markup_kind, false);
             }
