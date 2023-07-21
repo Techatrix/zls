@@ -1673,7 +1673,7 @@ fn structInitExpr(
 
     if (struct_init.ast.type_expr == 0) {
         if (struct_init.ast.fields.len == 0) {
-            return rvalue(gz, ri, .empty_struct_type, node);
+            return rvalue(gz, ri, .empty_aggregate, node);
         }
     } else array: {
         const node_tags = tree.nodes.items(.tag);
@@ -3302,6 +3302,7 @@ fn varDecl(
                 alloc: Zir.Inst.Ref,
             } = if (var_decl.ast.type_node != 0) a: {
                 const type_inst = try typeExpr(gz, scope, var_decl.ast.type_node);
+                try gz.addDbgVar(.dbg_var_val, ident_name, type_inst);
                 const alloc = alloc: {
                     if (align_inst == .none) {
                         const tag: Zir.Inst.Tag = if (is_comptime)
@@ -3345,13 +3346,12 @@ fn varDecl(
             };
             const prev_anon_name_strategy = gz.anon_name_strategy;
             gz.anon_name_strategy = .dbg_var;
-            _ = try reachableExprComptime(gz, scope, var_data.result_info, var_decl.ast.init_node, node, is_comptime);
+            const init_expr = try reachableExprComptime(gz, scope, var_data.result_info, var_decl.ast.init_node, node, is_comptime);
             gz.anon_name_strategy = prev_anon_name_strategy;
             if (resolve_inferred_alloc != .none) {
                 _ = try gz.addUnNode(.resolve_inferred_alloc, resolve_inferred_alloc, node);
+                try gz.addDbgVar(.dbg_var_ptr, ident_name, init_expr);
             }
-
-            try gz.addDbgVar(.dbg_var_ptr, ident_name, var_data.alloc);
 
             const sub_scope = try block_arena.create(Scope.LocalPtr);
             sub_scope.* = .{
