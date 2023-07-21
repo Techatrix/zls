@@ -1172,6 +1172,7 @@ pub fn enumCompletionItems(self: *DocumentStore, arena: std.mem.Allocator, handl
 
 pub fn wantZir(self: DocumentStore) bool {
     if (!self.config.enable_ast_check_diagnostics) return false;
+    if (self.config.analysis_backend == .astgen_analyser) return true;
     const can_run_ast_check = std.process.can_spawn and self.config.zig_exe_path != null and self.config.prefer_ast_check_as_child_process;
     return !can_run_ast_check;
 }

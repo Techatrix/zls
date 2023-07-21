@@ -1524,7 +1524,7 @@ pub fn create(
 
     try configuration.configChanged(config, &server.runtime_zig_version, allocator, builtin_creation_dir);
 
-    if (config.dangerous_comptime_experiments_do_not_enable) {
+    if (config.analysis_backend != .default) {
         server.ip = try InternPool.init(allocator);
     }
 
