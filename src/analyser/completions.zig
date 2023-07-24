@@ -17,26 +17,28 @@ pub fn dotCompletions(
     std.debug.assert(index != .none);
     _ = node;
 
-    const index_key = ip.indexToKey(index);
-    const val: InternPool.Key = if (is_type_val) index_key else .{ .unknown_value = .{ .ty = index } };
-    const ty: InternPool.Key = if (is_type_val) ip.indexToKey(index_key.typeOf()) else index_key;
+    const val: InternPool.Index = if (is_type_val) index else .none;
+    const ty: InternPool.Index = if (is_type_val) ip.typeOf(index) else index;
 
-    const inner_ty = switch (ty) {
-        .pointer_type => |info| if (info.size == .One) ip.indexToKey(info.elem_type) else ty,
+    const inner_ty = switch (ip.indexToKey(ty)) {
+        .pointer_type => |pointer_info| if (pointer_info.size == .One) pointer_info.elem_type else ty,
         else => ty,
     };
 
-    switch (inner_ty) {
+    switch (ip.indexToKey(inner_ty)) {
         .simple_type => |simple| switch (simple) {
             .type => {
-                const namespace = val.getNamespace(ip.*);
+                if (val == .none) return;
+
+                const namespace = ip.getNamespace(val);
                 if (namespace != .none) {
                     // TODO lookup in namespace
                 }
-                switch (val) {
+
+                switch (ip.indexToKey(val)) {
                     .error_set_type => |error_set_info| {
                         for (error_set_info.names) |name| {
-                            const error_name = ip.indexToKey(name).bytes;
+                            const error_name = ip.string_pool.stringToSlice(name);
                             try completions.append(arena, .{
                                 .label = error_name,
                                 .kind = .Constant,
@@ -63,13 +65,11 @@ pub fn dotCompletions(
         },
         .pointer_type => |pointer_info| {
             if (pointer_info.size == .Slice) {
-                var many_ptr_info = InternPool.Key{ .pointer_type = pointer_info };
-                many_ptr_info.pointer_type.size = .Many;
-
                 try completions.append(arena, .{
                     .label = "ptr",
                     .kind = .Field,
-                    .detail = try std.fmt.allocPrint(arena, "ptr: {}", .{many_ptr_info.fmt(ip.*)}),
+                    // TODO this discards pointer attributes
+                    .detail = try std.fmt.allocPrint(arena, "ptr: [*]{}", .{pointer_info.elem_type.fmt(ip)}),
                 });
                 try completions.append(arena, .{
                     .label = "len",
@@ -112,7 +112,7 @@ pub fn dotCompletions(
             try completions.append(arena, .{
                 .label = "?",
                 .kind = .Operator,
-                .detail = try std.fmt.allocPrint(arena, "{}", .{optional_info.payload_type.fmt(ip.*)}),
+                .detail = try std.fmt.allocPrint(arena, "{}", .{optional_info.payload_type.fmt(ip)}),
             });
         },
         .enum_type => |enum_index| {
@@ -121,7 +121,7 @@ pub fn dotCompletions(
                 try completions.append(arena, .{
                     .label = field_name,
                     .kind = .Field,
-                    .detail = try std.fmt.allocPrint(arena, "{}", .{field_value.fmt(ip.*)}),
+                    .detail = try std.fmt.allocPrint(arena, "{}", .{field_value.fmt(ip)}),
                 });
             }
         },
@@ -135,9 +135,9 @@ pub fn dotCompletions(
                     .label = label,
                     .kind = .Field,
                     .detail = if (field.alignment != 0)
-                        try std.fmt.allocPrint(arena, "{s}: align({d}) {}", .{ label, field.alignment, field.ty.fmt(ip.*) })
+                        try std.fmt.allocPrint(arena, "{s}: align({d}) {}", .{ label, field.alignment, field.ty.fmt(ip) })
                     else
-                        try std.fmt.allocPrint(arena, "{s}: {}", .{ label, field.ty.fmt(ip.*) }),
+                        try std.fmt.allocPrint(arena, "{s}: {}", .{ label, field.ty.fmt(ip) }),
                 });
             }
         },
@@ -146,7 +146,7 @@ pub fn dotCompletions(
                 try completions.append(arena, .{
                     .label = try std.fmt.allocPrint(arena, "{d}", .{i}),
                     .kind = .Field,
-                    .detail = try std.fmt.allocPrint(arena, "{d}: {}", .{ i, tuple_ty.fmt(ip.*) }),
+                    .detail = try std.fmt.allocPrint(arena, "{d}: {}", .{ i, tuple_ty.fmt(ip) }),
                 });
             }
         },
@@ -168,9 +168,8 @@ pub fn dotCompletions(
         .float_80_value,
         .float_128_value,
         .float_comptime_value,
-        => unreachable,
+        => {},
 
-        .bytes,
         .optional_value,
         .slice,
         .aggregate,
@@ -178,13 +177,13 @@ pub fn dotCompletions(
         .null_value,
         .undefined_value,
         .unknown_value,
-        => unreachable,
+        => {},
     }
 }
 
 fn FormatContext(comptime T: type) type {
     return struct {
-        ip: *InternPool,
+        ip: *const InternPool,
         item: T,
     };
 }
@@ -205,13 +204,13 @@ fn formatFieldDetail(
     if (field.alignment != 0) {
         try writer.print("align({d}) ", .{field.alignment});
     }
-    try writer.print("{}", .{field.ty.fmt(ctx.ip.*)});
+    try writer.print("{}", .{field.ty.fmt(ctx.ip)});
     if (field.default_value != .none) {
-        try writer.print(" = {},", .{field.default_value.fmt(ctx.ip.*)});
+        try writer.print(" = {},", .{field.default_value.fmt(ctx.ip)});
     }
 }
 
-pub fn fmtFieldDetail(field: InternPool.Struct.Field, ip: *InternPool) std.fmt.Formatter(formatFieldDetail) {
+pub fn fmtFieldDetail(field: InternPool.Struct.Field, ip: *const InternPool) std.fmt.Formatter(formatFieldDetail) {
     return .{ .data = .{
         .ip = ip,
         .item = field,
