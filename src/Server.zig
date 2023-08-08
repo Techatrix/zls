@@ -15,6 +15,7 @@ const tracy = @import("tracy.zig");
 const diff = @import("diff.zig");
 const ComptimeInterpreter = @import("ComptimeInterpreter.zig");
 const InternPool = @import("analyser/analyser.zig").InternPool;
+const Module = @import("analyser/analyser.zig").Module;
 const ZigVersionWrapper = @import("ZigVersionWrapper.zig");
 const Transport = @import("Transport.zig");
 
@@ -46,7 +47,10 @@ thread_pool: if (zig_builtin.single_threaded) void else std.Thread.Pool,
 wait_group: if (zig_builtin.single_threaded) void else std.Thread.WaitGroup,
 job_queue: std.fifo.LinearFifo(Job, .Dynamic),
 job_queue_lock: std.Thread.Mutex = .{},
+/// initialized if config.analysis_backend != .default
 ip: InternPool = .{},
+/// set if config.analysis_backend == .astgen_analyser
+mod: ?Module = null,
 zig_exe_lock: std.Thread.Mutex = .{},
 client_capabilities: ClientCapabilities = .{},
 runtime_zig_version: ?ZigVersionWrapper = null,
@@ -1527,6 +1531,10 @@ pub fn create(
     if (config.analysis_backend != .default) {
         server.ip = try InternPool.init(allocator);
     }
+    if (config.analysis_backend == .astgen_analyser) {
+        server.mod = Module.init(allocator, &server.ip, &server.document_store);
+        server.document_store.mod = &server.mod.?;
+    }
 
     return server;
 }
@@ -1540,6 +1548,7 @@ pub fn destroy(server: *Server) void {
     while (server.job_queue.readItem()) |job| job.deinit(server.allocator);
     server.job_queue.deinit();
     server.document_store.deinit();
+    if (server.mod) |*mod| mod.deinit();
     server.ip.deinit(server.allocator);
     if (server.runtime_zig_version) |zig_version| zig_version.free();
     server.allocator.destroy(server);

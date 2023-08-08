@@ -1,5 +1,6 @@
 comptime {
     _ = @import("helper.zig");
+    _ = @import("sema.zig");
 
     _ = @import("utility/ast.zig");
     _ = @import("utility/offsets.zig");

@@ -93,11 +93,17 @@ pub fn hoverSymbol(
         .switch_payload,
         .label_decl,
         .error_token,
+        .intern_pool_index,
         => tree.tokenSlice(decl_handle.nameToken()),
     };
 
     var resolved_type_str: []const u8 = "unknown";
-    if (try decl_handle.resolveType(analyser)) |resolved_type| {
+    if (decl_handle.decl.* == .intern_pool_index) blk: {
+        const index = decl_handle.decl.intern_pool_index.index;
+        if (index == .none) break :blk;
+        const ip = analyser.ip.?;
+        resolved_type_str = try std.fmt.allocPrint(arena, "{}", .{ip.typeOf(index).fmt(ip)});
+    } else if (try decl_handle.resolveType(analyser)) |resolved_type| {
         if (doc_str == null) {
             doc_str = try resolved_type.docComments(arena);
         }

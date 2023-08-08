@@ -249,6 +249,7 @@ pub fn symbolReferences(
         },
         .label_decl => unreachable, // handled separately by labelReferences
         .error_token => {},
+        .intern_pool_index => {}, // TODO
     }
 
     return builder.locations;

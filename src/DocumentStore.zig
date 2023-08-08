@@ -15,6 +15,7 @@ const translate_c = @import("translate_c.zig");
 const ComptimeInterpreter = @import("ComptimeInterpreter.zig");
 const AstGen = @import("stage2/AstGen.zig");
 const Zir = @import("stage2/Zir.zig");
+const Module = @import("analyser/Module.zig");
 const InternPool = @import("analyser/InternPool.zig");
 
 const legacy_json = @import("legacy_json.zig");
@@ -68,6 +69,7 @@ pub const Handle = struct {
         outdated,
         done,
     } = .none,
+    root_decl: InternPool.OptionalDeclIndex = .none,
     /// Not null if a ComptimeInterpreter is actually used
     interpreter: ?*ComptimeInterpreter = null,
     document_scope: analysis.DocumentScope,
@@ -83,12 +85,13 @@ pub const Handle = struct {
     /// uri memory managed by its build_file
     associated_build_file: ?Uri = null,
 
-    pub fn deinit(self: *Handle, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Handle, allocator: std.mem.Allocator, mod: ?*Module) void {
         if (self.interpreter) |interpreter| {
             interpreter.deinit();
             allocator.destroy(interpreter);
         }
         self.document_scope.deinit(allocator);
+        if (self.root_decl.unwrap()) |decl_index| mod.?.destroyDecl(decl_index);
         if (self.zir_status != .none) self.zir.deinit(allocator);
         self.tree.deinit(allocator);
         allocator.free(self.text);
@@ -125,10 +128,11 @@ lock: std.Thread.RwLock = .{},
 handles: std.StringArrayHashMapUnmanaged(*Handle) = .{},
 build_files: std.StringArrayHashMapUnmanaged(BuildFile) = .{},
 cimports: std.AutoArrayHashMapUnmanaged(Hash, translate_c.Result) = .{},
+mod: ?*Module = null,
 
 pub fn deinit(self: *DocumentStore) void {
     for (self.handles.values()) |handle| {
-        handle.deinit(self.allocator);
+        handle.deinit(self.allocator, self.mod);
         self.allocator.destroy(handle);
     }
     self.handles.deinit(self.allocator);
@@ -300,11 +304,26 @@ pub fn refreshDocument(self: *DocumentStore, uri: Uri, new_text: [:0]const u8) !
         handle.zir = undefined;
     }
 
-    handle.deinit(self.allocator);
+    if (self.config.analysis_backend == .astgen_analyser) {
+        analysis.transferInternPoolData(handle, &new_handle.document_scope);
+    }
+
+    handle.deinit(self.allocator, self.mod);
     handle.* = new_handle;
 
     const new_import_count = handle.import_uris.items.len;
     const new_cimport_count = handle.cimports.len;
+
+    if (self.config.analysis_backend == .astgen_analyser and
+        handle.zir_status == .done and // TODO support oudated
+        !handle.zir.hasCompileErrors())
+    {
+        if (handle.root_decl.unwrap()) |decl_index| {
+            self.mod.?.destroyDecl(decl_index);
+            handle.root_decl = .none;
+        }
+        try self.mod.?.semaFile(handle);
+    }
 
     if (old_import_count != new_import_count or
         old_cimport_count != new_cimport_count)
@@ -384,7 +403,7 @@ fn garbageCollectionImports(self: *DocumentStore) error{OutOfMemory}!void {
         const handle = self.handles.values()[handle_index];
         log.debug("Closing document {s}", .{handle.uri});
         self.handles.swapRemoveAt(handle_index);
-        handle.deinit(self.allocator);
+        handle.deinit(self.allocator, self.mod);
         self.allocator.destroy(handle);
     }
 }
@@ -792,7 +811,18 @@ fn createDocument(self: *DocumentStore, uri: Uri, text: [:0]const u8, open: bool
             .document_scope = document_scope,
         };
     };
-    errdefer handle.deinit(self.allocator);
+    errdefer handle.deinit(self.allocator, self.mod);
+
+    if (self.config.analysis_backend == .astgen_analyser and
+        handle.zir_status == .done and // TODO support oudated
+        !handle.zir.hasCompileErrors())
+    {
+        if (handle.root_decl.unwrap()) |decl_index| {
+            self.mod.?.destroyDecl(decl_index);
+            handle.root_decl = .none;
+        }
+        try self.mod.?.semaFile(&handle);
+    }
 
     handle.import_uris = try self.collectImportUris(handle);
     handle.cimports = try collectCIncludes(self.allocator, handle.tree);
@@ -849,7 +879,7 @@ fn createAndStoreDocument(self: *DocumentStore, uri: Uri, text: [:0]const u8, op
     };
 
     if (gop.found_existing) {
-        handle.deinit(self.allocator);
+        handle.deinit(self.allocator, self.mod);
         self.allocator.destroy(handle_ptr);
     }
 

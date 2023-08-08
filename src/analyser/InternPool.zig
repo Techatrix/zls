@@ -55,6 +55,8 @@ pub const StructIndex = enum(u32) { _ };
 
 pub const Struct = struct {
     fields: std.StringArrayHashMapUnmanaged(Field),
+    owner_decl: OptionalDeclIndex,
+    zir_index: u32,
     namespace: NamespaceIndex,
     layout: std.builtin.Type.ContainerLayout = .Auto,
     backing_int_ty: Index,
@@ -78,6 +80,7 @@ pub const ErrorUnion = struct {
 };
 
 pub const ErrorSet = struct {
+    owner_decl: OptionalDeclIndex,
     names: []const StringPool.String,
 };
 
@@ -185,17 +188,54 @@ pub const UnknownValue = struct {
     ty: Index,
 };
 
-pub const DeclIndex = enum(u32) { _ };
+pub const DeclIndex = enum(u32) {
+    _,
+
+    pub fn toOptional(i: DeclIndex) OptionalDeclIndex {
+        return @as(OptionalDeclIndex, @enumFromInt(@intFromEnum(i)));
+    }
+};
+
+pub const OptionalDeclIndex = enum(u32) {
+    none = std.math.maxInt(u32),
+    _,
+
+    pub fn init(oi: ?DeclIndex) OptionalDeclIndex {
+        return if (oi) |index| index.toOptional() else .none;
+    }
+
+    pub fn unwrap(oi: OptionalDeclIndex) ?DeclIndex {
+        if (oi == .none) return null;
+        return @as(DeclIndex, @enumFromInt(@intFromEnum(oi)));
+    }
+};
 
 pub const Decl = struct {
     name: []const u8,
     node_idx: u32,
+    src_line: u32,
+    zir_decl_index: u32 = 0,
     /// this stores both the type and the value
     index: Index,
     alignment: u16,
     address_space: std.builtin.AddressSpace,
+    src_namespace: InternPool.NamespaceIndex,
+    analysis: enum {
+        unreferenced,
+        in_progress,
+        complete,
+    } = .complete,
     is_pub: bool,
     is_exported: bool,
+    kind: Kind = undefined,
+
+    pub const Kind = enum {
+        @"usingnamespace",
+        @"test",
+        @"comptime",
+        named,
+        anon,
+    };
 };
 
 const BigIntInternal = struct {
@@ -2506,6 +2546,7 @@ pub fn intInfo(ip: *const InternPool, ty: Index, target: std.Target) std.builtin
         .anyerror_type => return .{ .signedness = .unsigned, .bits = 16 },
 
         else => switch (ip.indexToKey(index)) {
+            .int_type => |int_info| return int_info,
             .enum_type => |enum_index| {
                 const enum_info = ip.getEnum(enum_index);
                 index = enum_info.tag_type;
@@ -3086,7 +3127,12 @@ fn printInternal(ip: *const InternPool, ty: Index, writer: anytype, options: For
 
             return array_info.child;
         },
-        .struct_type => return panicOrElse("TODO", null),
+        .struct_type => |struct_index| {
+            const optional_decl_index = ip.getStruct(struct_index).owner_decl;
+            const decl_index = optional_decl_index.unwrap() orelse return panicOrElse("TODO", null);
+            const decl = ip.getDecl(decl_index);
+            try writer.writeAll(decl.name);
+        },
         .optional_type => |optional_info| {
             try writer.writeByte('?');
             return optional_info.payload_type;
@@ -3097,6 +3143,11 @@ fn printInternal(ip: *const InternPool, ty: Index, writer: anytype, options: For
             return error_union_info.payload_type;
         },
         .error_set_type => |error_set_info| {
+            if (error_set_info.owner_decl.unwrap()) |decl_index| {
+                const decl = ip.getDecl(decl_index);
+                try writer.writeAll(decl.name);
+                return null;
+            }
             const names = error_set_info.names;
             try writer.writeAll("error{");
             for (names, 0..) |name, i| {
@@ -3551,13 +3602,18 @@ test "error set type" {
     const bar_name = try ip.string_pool.getOrPutString(gpa, "bar");
     const baz_name = try ip.string_pool.getOrPutString(gpa, "baz");
 
-    const empty_error_set = try ip.get(gpa, .{ .error_set_type = .{ .names = &.{} } });
+    const empty_error_set = try ip.get(gpa, .{ .error_set_type = .{
+        .owner_decl = .none,
+        .names = &.{},
+    } });
 
     const foo_bar_baz_set = try ip.get(gpa, .{ .error_set_type = .{
+        .owner_decl = .none,
         .names = &.{ foo_name, bar_name, baz_name },
     } });
 
     const foo_bar_set = try ip.get(gpa, .{ .error_set_type = .{
+        .owner_decl = .none,
         .names = &.{ foo_name, bar_name },
     } });
 
@@ -3575,7 +3631,10 @@ test "error union type" {
     var ip = try InternPool.init(gpa);
     defer ip.deinit(gpa);
 
-    const empty_error_set = try ip.get(gpa, .{ .error_set_type = .{ .names = &.{} } });
+    const empty_error_set = try ip.get(gpa, .{ .error_set_type = .{
+        .owner_decl = .none,
+        .names = &.{},
+    } });
     const bool_type = try ip.get(gpa, .{ .simple_type = .bool });
 
     const @"error{}!bool" = try ip.get(gpa, .{ .error_union_type = .{
@@ -3616,6 +3675,8 @@ test "struct value" {
 
     const struct_index = try ip.createStruct(gpa, .{
         .fields = .{},
+        .owner_decl = .none,
+        .zir_index = 0,
         .namespace = .none,
         .layout = .Auto,
         .backing_int_ty = .none,
@@ -3785,10 +3846,22 @@ test "coerceInMemoryAllowed error set" {
     const bar_name = try ip.string_pool.getOrPutString(gpa, "bar");
     const baz_name = try ip.string_pool.getOrPutString(gpa, "baz");
 
-    const foo_bar_baz_set = try ip.get(gpa, .{ .error_set_type = .{ .names = &.{ baz_name, bar_name, foo_name } } });
-    const foo_bar_set = try ip.get(gpa, .{ .error_set_type = .{ .names = &.{ foo_name, bar_name } } });
-    const foo_set = try ip.get(gpa, .{ .error_set_type = .{ .names = &.{foo_name} } });
-    const empty_set = try ip.get(gpa, .{ .error_set_type = .{ .names = &.{} } });
+    const foo_bar_baz_set = try ip.get(gpa, .{ .error_set_type = .{
+        .owner_decl = .none,
+        .names = &.{ baz_name, bar_name, foo_name },
+    } });
+    const foo_bar_set = try ip.get(gpa, .{ .error_set_type = .{
+        .owner_decl = .none,
+        .names = &.{ foo_name, bar_name },
+    } });
+    const foo_set = try ip.get(gpa, .{ .error_set_type = .{
+        .owner_decl = .none,
+        .names = &.{foo_name},
+    } });
+    const empty_set = try ip.get(gpa, .{ .error_set_type = .{
+        .owner_decl = .none,
+        .names = &.{},
+    } });
 
     try expect(try ip.coerceInMemoryAllowed(gpa, arena, .anyerror_type, foo_bar_baz_set, true, builtin.target) == .ok);
     try expect(try ip.coerceInMemoryAllowed(gpa, arena, .anyerror_type, foo_bar_set, true, builtin.target) == .ok);
@@ -4053,15 +4126,8 @@ fn testResolvePeerTypes(ip: *InternPool, a: Index, b: Index, expected: Index) !v
 }
 
 fn testResolvePeerTypesInOrder(ip: *InternPool, lhs: Index, rhs: Index, expected: Index) !void {
-    const gpa = std.testing.allocator;
-    const actual = try resolvePeerTypes(ip, gpa, &.{ lhs, rhs }, builtin.target);
+    const actual = try resolvePeerTypes(ip, std.testing.allocator, &.{ lhs, rhs }, builtin.target);
     if (expected == actual) return;
-
-    const expected_type = if (expected == .none) @tagName(Index.none) else try std.fmt.allocPrint(gpa, "{}", .{expected.fmt(ip)});
-    defer if (expected != .none) gpa.free(expected_type);
-    const actual_type = if (actual == .none) @tagName(Index.none) else try std.fmt.allocPrint(gpa, "{}", .{actual.fmt(ip)});
-    defer if (actual != .none) gpa.free(actual_type);
-
-    std.debug.print("expected `{s}`, found `{s}`\n", .{ expected_type, actual_type });
+    std.debug.print("expected `{}`, found `{}`\n", .{ expected.fmtDebug(ip), actual.fmtDebug(ip) });
     return error.TestExpectedEqual;
 }

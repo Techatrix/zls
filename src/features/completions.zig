@@ -72,6 +72,10 @@ fn typeToCompletion(
             null,
             either_descriptor,
         ),
+        .either => |bruh| {
+            for (bruh) |a|
+                try typeToCompletion(server, analyser, arena, list, .{ .original = a.type_with_handle }, orig_handle, a.descriptor);
+        },
         .@"comptime" => |co| try analyser_completions.dotCompletions(
             arena,
             list,
@@ -80,10 +84,14 @@ fn typeToCompletion(
             type_handle.type.is_type_val,
             co.value.node_idx,
         ),
-        .either => |bruh| {
-            for (bruh) |a|
-                try typeToCompletion(server, analyser, arena, list, .{ .original = a.type_with_handle }, orig_handle, a.descriptor);
-        },
+        .intern_pool_index => |index| try analyser_completions.dotCompletions(
+            arena,
+            list,
+            &server.ip,
+            index,
+            type_handle.type.is_type_val,
+            null,
+        ),
         else => {},
     }
 }
@@ -474,6 +482,14 @@ fn declToCompletion(context: DeclToCompletionContext, decl_handle: Analyser.Decl
                 .insertTextFormat = .PlainText,
             });
         },
+        .intern_pool_index => |payload| try analyser_completions.dotCompletions(
+            context.arena,
+            context.completions,
+            context.analyser.ip.?,
+            payload.index,
+            false,
+            null,
+        ),
     }
 }
 

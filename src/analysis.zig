@@ -1595,6 +1595,7 @@ pub const Type = struct {
             interpreter: *ComptimeInterpreter,
             value: ComptimeInterpreter.Value,
         },
+        intern_pool_index: InternPool.Index,
     },
     /// If true, the type `type`, the attached data is the value of the type value.
     is_type_val: bool,
@@ -1627,8 +1628,12 @@ pub const TypeWithHandle = struct {
                     }
                 },
                 .array_index => {},
-                .@"comptime" => {
-                    // TODO
+                .@"comptime" => |co| {
+                    std.hash.autoHash(hasher, co.value.node_idx);
+                    std.hash.autoHash(hasher, co.value.index);
+                },
+                .intern_pool_index => |index| {
+                    std.hash.autoHash(hasher, index);
                 },
             }
         }
@@ -1679,7 +1684,12 @@ pub const TypeWithHandle = struct {
                 },
                 .array_index => {},
                 .@"comptime" => {
+                    return a.type.data.@"comptime".value.index == b.type.data.@"comptime".value.index and
+                        a.type.data.@"comptime".value.node_idx == b.type.data.@"comptime".value.node_idx;
                     // TODO
+                },
+                .intern_pool_index => {
+                    return a.type.data.intern_pool_index == b.type.data.intern_pool_index;
                 },
             }
 
@@ -2524,6 +2534,10 @@ pub const Declaration = union(enum) {
     },
     /// always an identifier
     error_token: Ast.TokenIndex,
+    intern_pool_index: struct {
+        name: Ast.TokenIndex,
+        index: InternPool.Index,
+    },
 
     pub const Index = enum(u32) { _ };
 
@@ -2575,6 +2589,7 @@ pub const DeclWithHandle = struct {
             .switch_payload => |sp| sp.node,
             .label_decl => |ld| ld.label,
             .error_token => |et| et,
+            .intern_pool_index => |payload| payload.name,
         };
     }
 
@@ -2778,6 +2793,10 @@ pub const DeclWithHandle = struct {
                 return null;
             },
             .error_token => return null,
+            .intern_pool_index => |payload| return TypeWithHandle{
+                .type = .{ .data = .{ .intern_pool_index = payload.index }, .is_type_val = false },
+                .handle = self.handle,
+            },
         };
     }
 };
@@ -2989,8 +3008,8 @@ pub fn iterateSymbolsGlobal(
     return try analyser.iterateSymbolsGlobalInternal(handle, source_index, callback, context);
 }
 
-pub fn innermostBlockScopeIndex(handle: DocumentStore.Handle, source_index: usize) Scope.Index {
-    var scope_iterator = iterateEnclosingScopes(handle.document_scope, source_index);
+pub fn innermostBlockScopeIndex(document_scope: DocumentScope, source_index: usize) Scope.Index {
+    var scope_iterator = iterateEnclosingScopes(document_scope, source_index);
     var scope_index: Scope.Index = .none;
     while (scope_iterator.next()) |inner_scope| {
         scope_index = inner_scope;
@@ -3006,7 +3025,7 @@ fn innermostBlockScopeInternal(handle: DocumentStore.Handle, source_index: usize
     const scope_datas = handle.document_scope.scopes.items(.data);
     const scope_parents = handle.document_scope.scopes.items(.parent);
 
-    var scope_index = innermostBlockScopeIndex(handle, source_index);
+    var scope_index = innermostBlockScopeIndex(handle.document_scope, source_index);
     while (true) {
         defer scope_index = scope_parents[@intFromEnum(scope_index)];
         const data = scope_datas[@intFromEnum(scope_index)];
@@ -3097,7 +3116,7 @@ pub fn lookupSymbolGlobal(
     const scope_decls = handle.document_scope.scopes.items(.decls);
     const scope_uses = handle.document_scope.scopes.items(.uses);
 
-    var current_scope = innermostBlockScopeIndex(handle.*, source_index);
+    var current_scope = innermostBlockScopeIndex(handle.document_scope, source_index);
 
     while (current_scope != .none) {
         const scope_index = @intFromEnum(current_scope);
@@ -3176,6 +3195,36 @@ pub fn lookupSymbolFieldInit(
         field_name,
         .field,
     );
+}
+
+pub fn lookupDeclaration(document_scope: DocumentScope, symbol: Declaration.Key, source_index: usize) ?*Declaration {
+    const scope_parents = document_scope.scopes.items(.parent);
+    const scope_decls = document_scope.scopes.items(.decls);
+
+    var current_scope = innermostBlockScopeIndex(document_scope, source_index);
+
+    while (current_scope != .none) {
+        const scope_index = @intFromEnum(current_scope);
+        defer current_scope = scope_parents[scope_index];
+        const decl_index = scope_decls[scope_index].get(symbol) orelse continue;
+        const decl = &document_scope.decls.items[@intFromEnum(decl_index)];
+        if (decl.* == .label_decl) continue;
+        return decl;
+    }
+
+    return null;
+}
+
+// this is incredibly inefficient but it works
+pub fn transferInternPoolData(from: *DocumentStore.Handle, to: *DocumentScope) void {
+    for (from.document_scope.decls.items) |from_decl| {
+        if (from_decl != .intern_pool_index) continue;
+        const name_token = from_decl.intern_pool_index.name;
+        const source_index = offsets.tokenToIndex(from.tree, name_token);
+        const symbol = Declaration.Key{ .kind = .variable, .name = offsets.tokenToSlice(from.tree, name_token) };
+        const to_decl = lookupDeclaration(to.*, symbol, source_index) orelse continue;
+        to_decl.* = from_decl;
+    }
 }
 
 pub fn resolveExpressionType(
