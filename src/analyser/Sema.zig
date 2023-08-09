@@ -137,7 +137,12 @@ pub const Block = struct {
 
     pub const Label = struct {
         zir_block: Zir.Inst.Index,
-        results: std.ArrayListUnmanaged(Index),
+        merges: std.MultiArrayList(Merge),
+    };
+
+    pub const Merge = struct {
+        result: Index,
+        src_loc: ?LazySrcLoc,
     };
 
     pub fn getHandle(block: *Block, mod: *Module) *Module.Handle {
@@ -675,26 +680,31 @@ fn zirBreak(sema: *Sema, start_block: *Block, inst: Zir.Inst.Index) !Zir.Inst.In
     const zir_block = extra.block_inst;
 
     var block = start_block;
-    while (true) {
-        if (block.label) |label| {
-            if (label.zir_block == zir_block) {
-                try label.results.append(sema.gpa, operand);
-                return inst;
-            }
-        }
-        block = block.parent.?;
+    while (true) : (block = block.parent.?) {
+        const label = block.label orelse continue;
+        if (label.zir_block != zir_block) continue;
+
+        const src_loc = if (extra.operand_src_node != Zir.Inst.Break.no_src_node)
+            LazySrcLoc.nodeOffset(extra.operand_src_node)
+        else
+            null;
+        try label.merges.append(sema.gpa, .{
+            .result = operand,
+            .src_loc = src_loc,
+        });
+        return inst;
     }
 }
 
 fn zirBlock(sema: *Sema, parent_block: *Block, inst: Zir.Inst.Index, force_comptime: bool) Allocator.Error!Index {
     const pl_node = sema.code.instructions.items(.data)[inst].pl_node;
-    // const src: Module.LazySrcLoc = pl_node.src();
+    const src = pl_node.src();
     const extra = sema.code.extraData(Zir.Inst.Block, pl_node.payload_index);
     const body = sema.code.extra[extra.end..][0..extra.data.body_len];
 
     var label: Block.Label = .{
         .zir_block = inst,
-        .results = .{},
+        .merges = .{},
     };
 
     var child_block: Block = .{
@@ -705,18 +715,30 @@ fn zirBlock(sema: *Sema, parent_block: *Block, inst: Zir.Inst.Index, force_compt
         .is_comptime = parent_block.is_comptime or force_comptime,
     };
     defer child_block.params.deinit(sema.gpa);
-    defer if (child_block.label) |l| l.results.deinit(sema.gpa);
+    defer if (child_block.label) |l| l.merges.deinit(sema.gpa);
 
     if (child_block.is_comptime) {
         return try sema.resolveBody(&child_block, body);
     } else {
         _ = try sema.analyzeBodyInner(&child_block, body);
-        const result_types = try sema.arena.alloc(Index, label.results.items.len);
+        const result_types = try sema.arena.alloc(Index, label.merges.items(.result).len);
         defer sema.arena.free(result_types);
-        for (label.results.items, result_types) |val, *ty| {
+        for (label.merges.items(.result), result_types) |val, *ty| {
             ty.* = sema.typeOf(val);
         }
-        return try sema.mod.ip.resolvePeerTypes(sema.gpa, result_types, builtin.target);
+        const resolved_ty = try sema.mod.ip.resolvePeerTypes(sema.gpa, result_types, builtin.target);
+        if (resolved_ty == .void_type) {
+            // TODO implement switch_block and other control flow instructions to avoid false positives
+            return .unknown_unknown;
+        }
+        if (resolved_ty == .none) {
+            // TODO error message
+            return .unknown_unknown;
+        }
+        for (label.merges.items(.result), label.merges.items(.src_loc)) |result, src_loc| {
+            _ = try sema.coerce(&child_block, resolved_ty, result, src_loc orelse src);
+        }
+        return try sema.getUnknownValue(resolved_ty);
     }
 }
 
@@ -1425,7 +1447,7 @@ fn zirFunc(
             .is_comptime = false,
         };
         defer inner_block.params.deinit(sema.gpa);
-        defer if (inner_block.label) |l| l.results.deinit(sema.gpa);
+        defer if (inner_block.label) |l| l.merges.deinit(sema.gpa);
 
         _ = try sema.analyzeBodyInner(&inner_block, body);
         extra_index += body.len;
@@ -1994,7 +2016,7 @@ fn semaStructFields(sema: *Sema, struct_obj: *InternPool.Struct) Allocator.Error
         .is_comptime = true,
     };
     defer block_scope.params.deinit(sema.gpa);
-    defer if (block_scope.label) |l| l.results.deinit(sema.gpa);
+    defer if (block_scope.label) |l| l.merges.deinit(sema.gpa);
 
     try struct_obj.fields.ensureTotalCapacity(sema.gpa, fields_len);
 

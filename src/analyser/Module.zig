@@ -301,7 +301,7 @@ pub fn semaDecl(mod: *Module, decl_index: DeclIndex) Allocator.Error!void {
         .is_comptime = true,
     };
     defer block_scope.params.deinit(mod.gpa);
-    defer if (block_scope.label) |l| l.results.deinit(sema.gpa);
+    defer if (block_scope.label) |l| l.merges.deinit(sema.gpa);
 
     const zir_block_index = Module.zirBlockIndex(decl, mod);
     const inst_data = zir_datas[zir_block_index].pl_node;
